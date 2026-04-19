@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import * as pdfjsLib from "pdfjs-dist";
 
@@ -7,10 +7,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString();
 
-const ADMIN_CREDENTIALS = {
+const DEFAULT_ADMIN_CREDENTIALS = {
   username: "admin",
-  password: "admin1234",
+  password: "admin123",
 };
+
+const ADMIN_CREDENTIALS_STORAGE_KEY = "airforce-mart-admin-credentials";
 
 function getTodayString() {
   return new Date().toISOString().split("T")[0];
@@ -32,6 +34,22 @@ function formatDisplayDate(value) {
     month: "short",
     year: "numeric",
   });
+}
+
+function loadStoredAdminCredentials() {
+  if (typeof window === "undefined") return DEFAULT_ADMIN_CREDENTIALS;
+  try {
+    const raw = window.localStorage.getItem(ADMIN_CREDENTIALS_STORAGE_KEY);
+    if (!raw) return DEFAULT_ADMIN_CREDENTIALS;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.username || !parsed?.password) return DEFAULT_ADMIN_CREDENTIALS;
+    return {
+      username: String(parsed.username),
+      password: String(parsed.password),
+    };
+  } catch {
+    return DEFAULT_ADMIN_CREDENTIALS;
+  }
 }
 
 const defaultPointHistory = [
@@ -412,6 +430,56 @@ async function extractItemsFromPdf(file) {
   return deduped;
 }
 
+function buildExportRows({ members, items, config }) {
+  const rows = [
+    ["NO", "ID MEMBER", "NAMA MEMBER", "NAMA PRODUK", "QTY", "HARGA KATALOG HK", "TOTAL HK", "GRAND TOTAL"],
+  ];
+
+  if (members.length > 0) {
+    members.forEach((member, memberIndex) => {
+      const grandTotal = member.items.reduce((sum, item) => sum + item.qty * item.price, 0);
+      member.items.forEach((item, itemIndex) => {
+        rows.push([
+          itemIndex === 0 ? member.no || memberIndex + 1 : "",
+          itemIndex === 0 ? member.memberId || "" : "",
+          itemIndex === 0 ? member.memberName || "Tanpa Nama Member" : "",
+          item.name,
+          item.qty,
+          item.price,
+          item.qty * item.price,
+          itemIndex === 0 ? grandTotal : "",
+        ]);
+      });
+    });
+  } else {
+    const grandTotal = items.reduce((sum, item) => sum + item.qty * item.price, 0);
+    items.forEach((item, itemIndex) => {
+      rows.push([
+        itemIndex === 0 ? 1 : "",
+        itemIndex === 0 ? "UMUM" : "",
+        itemIndex === 0 ? "Transaksi Umum" : "",
+        item.name,
+        item.qty,
+        item.price,
+        item.qty * item.price,
+        itemIndex === 0 ? grandTotal : "",
+      ]);
+    });
+  }
+
+  rows.push([]);
+  rows.push(["KEY", "VALUE"]);
+  rows.push(["STORE_NAME", config.STORE_NAME]);
+  rows.push(["SOURCE_SHEET_NAME", config.SOURCE_SHEET_NAME]);
+  rows.push(["POINT_DIVISOR", config.POINT_DIVISOR]);
+  rows.push(["POINT_RULE", config.POINT_RULE]);
+  rows.push(["CURRENCY_LOCALE", config.CURRENCY_LOCALE]);
+  rows.push(["DATE_FROM", config.DATE_FROM]);
+  rows.push(["DATE_TO", config.DATE_TO]);
+
+  return rows;
+}
+
 function LoginScreen({
   loginMode,
   setLoginMode,
@@ -421,6 +489,7 @@ function LoginScreen({
   setAdminForm,
   authError,
   onLogin,
+  currentAdminCredentials,
 }) {
   return (
     <div className="min-h-screen bg-slate-100 flex items-center justify-center p-6">
@@ -513,7 +582,7 @@ function LoginScreen({
                 />
               </div>
               <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 text-xs text-slate-500">
-                Demo admin: username <span className="font-bold">admin</span>, password <span className="font-bold">admin123</span>
+                Admin aktif: username <span className="font-bold">{currentAdminCredentials.username}</span>, password <span className="font-bold">{currentAdminCredentials.password}</span>
               </div>
               <button className="w-full bg-slate-900 text-white py-3 rounded-2xl text-sm font-bold">
                 Masuk sebagai Admin
@@ -544,6 +613,16 @@ export default function AlpaGiftStyleApp() {
     username: "",
     password: "",
   });
+  const [adminCredentials, setAdminCredentials] = useState(loadStoredAdminCredentials);
+  const [adminSettingsForm, setAdminSettingsForm] = useState(() => {
+    const stored = loadStoredAdminCredentials();
+    return {
+      username: stored.username,
+      password: stored.password,
+      confirmPassword: stored.password,
+    };
+  });
+  const [adminSettingsMessage, setAdminSettingsMessage] = useState("");
   const [view, setView] = useState("member");
   const [pointHistory] = useState(defaultPointHistory);
   const [fallbackSalesItems, setFallbackSalesItems] = useState(defaultSalesItems);
@@ -553,11 +632,20 @@ export default function AlpaGiftStyleApp() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploadInfo, setUploadInfo] = useState(null);
+  const [saveFileMessage, setSaveFileMessage] = useState("");
   const [dateRange, setDateRange] = useState({
     from: defaultConfig.DATE_FROM,
     to: defaultConfig.DATE_TO,
   });
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      ADMIN_CREDENTIALS_STORAGE_KEY,
+      JSON.stringify(adminCredentials)
+    );
+  }, [adminCredentials]);
 
   const isAdmin = authUser?.role === "admin";
   const activeMember = importedMembers[selectedMemberIndex] || null;
@@ -586,6 +674,25 @@ export default function AlpaGiftStyleApp() {
       maximumFractionDigits: 0,
     }).format(value);
 
+  const syncMemberItems = (updater) => {
+    if (activeMember) {
+      setImportedMembers((prev) =>
+        prev.map((member, index) => {
+          if (index !== selectedMemberIndex) return member;
+          const nextItems = updater(member.items);
+          return {
+            ...member,
+            items: nextItems,
+            grandTotal: nextItems.reduce((sum, item) => sum + item.qty * item.price, 0),
+          };
+        })
+      );
+      return;
+    }
+
+    setFallbackSalesItems((prev) => updater(prev));
+  };
+
   const handleLogin = (event, role) => {
     event.preventDefault();
     setAuthError("");
@@ -606,8 +713,8 @@ export default function AlpaGiftStyleApp() {
     }
 
     if (
-      adminForm.username.trim() !== ADMIN_CREDENTIALS.username ||
-      adminForm.password !== ADMIN_CREDENTIALS.password
+      adminForm.username.trim() !== adminCredentials.username ||
+      adminForm.password !== adminCredentials.password
     ) {
       setAuthError("Username atau password admin tidak sesuai.");
       return;
@@ -638,6 +745,8 @@ export default function AlpaGiftStyleApp() {
     });
     setAdminEditedPointsByMember({});
     setAdminPointInputByMember({});
+    setSaveFileMessage("");
+    setAdminSettingsMessage("");
     setMemberForm({ memberId: "", memberName: "" });
     setAdminForm({ username: "", password: "" });
     if (fileInputRef.current) {
@@ -658,6 +767,7 @@ export default function AlpaGiftStyleApp() {
     setAdminPointInputByMember({});
     setUploadInfo(null);
     setUploadError("");
+    setSaveFileMessage("");
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -674,6 +784,7 @@ export default function AlpaGiftStyleApp() {
 
     setUploading(true);
     setUploadError("");
+    setSaveFileMessage("");
 
     try {
       let importedItems = [];
@@ -753,6 +864,101 @@ export default function AlpaGiftStyleApp() {
     }
   };
 
+  const handleExportTransactions = () => {
+    try {
+      const exportConfig = {
+        ...appConfig,
+        DATE_FROM: dateRange.from || appConfig.DATE_FROM || defaultConfig.DATE_FROM,
+        DATE_TO: dateRange.to || appConfig.DATE_TO || defaultConfig.DATE_TO,
+      };
+      const worksheet = XLSX.utils.aoa_to_sheet(
+        buildExportRows({
+          members: importedMembers,
+          items: fallbackSalesItems,
+          config: exportConfig,
+        })
+      );
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, exportConfig.SOURCE_SHEET_NAME || "UMUM");
+      const safeStoreName = String(exportConfig.STORE_NAME || "transaksi")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+      const filename = `${safeStoreName || "transaksi"}-${getTodayString()}.xlsx`;
+      XLSX.writeFile(workbook, filename);
+      setSaveFileMessage(`File berhasil disimpan: ${filename}`);
+    } catch (error) {
+      setSaveFileMessage(error.message || "Gagal menyimpan file transaksi.");
+    }
+  };
+
+  const handleSalesItemChange = (index, field, rawValue) => {
+    syncMemberItems((items) =>
+      items.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        if (field === "name") {
+          return {
+            ...item,
+            name: rawValue,
+          };
+        }
+
+        const numericValue = field === "qty" ? parseQty(rawValue) || 1 : parseMoney(rawValue);
+        return {
+          ...item,
+          [field]: numericValue,
+        };
+      })
+    );
+  };
+
+  const handleDeleteSalesItem = (index) => {
+    syncMemberItems((items) => items.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const handleAddSalesItem = () => {
+    syncMemberItems((items) => [
+      ...items,
+      {
+        name: "Item Baru",
+        qty: 1,
+        price: 0,
+      },
+    ]);
+  };
+
+  const handleSaveAdminCredentials = () => {
+    setAdminSettingsMessage("");
+
+    const nextUsername = adminSettingsForm.username.trim();
+    const nextPassword = adminSettingsForm.password;
+    const nextConfirmPassword = adminSettingsForm.confirmPassword;
+
+    if (!nextUsername || !nextPassword) {
+      setAdminSettingsMessage("Username dan password admin wajib diisi.");
+      return;
+    }
+
+    if (nextPassword !== nextConfirmPassword) {
+      setAdminSettingsMessage("Konfirmasi password admin belum sama.");
+      return;
+    }
+
+    const nextCredentials = {
+      username: nextUsername,
+      password: nextPassword,
+    };
+
+    setAdminCredentials(nextCredentials);
+    setAdminSettingsForm({
+      username: nextCredentials.username,
+      password: nextCredentials.password,
+      confirmPassword: nextCredentials.password,
+    });
+    setAdminForm({ username: nextCredentials.username, password: "" });
+    setAdminSettingsMessage("Username dan password admin berhasil diperbarui.");
+  };
+
   if (!authUser) {
     return (
       <LoginScreen
@@ -764,6 +970,7 @@ export default function AlpaGiftStyleApp() {
         setAdminForm={setAdminForm}
         authError={authError}
         onLogin={handleLogin}
+        currentAdminCredentials={adminCredentials}
       />
     );
   }
@@ -826,99 +1033,168 @@ export default function AlpaGiftStyleApp() {
 
         <div className="p-5 space-y-4">
           {isAdmin && (
-            <div className="bg-slate-50 rounded-3xl border border-slate-200 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-bold text-slate-800">Upload Data Transaksi</h3>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Cocok untuk template Excel dengan kolom member dan item seperti sheet referensi.
-                  </p>
+            <>
+              <div className="bg-slate-50 rounded-3xl border border-slate-200 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-800">Upload Data Transaksi</h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Cocok untuk template Excel dengan kolom member dan item seperti sheet referensi.
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-slate-200 px-3 py-2 text-right">
+                    <p className="text-[10px] uppercase tracking-wide text-slate-500">Akses</p>
+                    <p className="text-sm font-bold text-slate-800">Diizinkan</p>
+                  </div>
                 </div>
-                <div className="bg-white rounded-2xl border border-slate-200 px-3 py-2 text-right">
-                  <p className="text-[10px] uppercase tracking-wide text-slate-500">Akses</p>
-                  <p className="text-sm font-bold text-slate-800">Diizinkan</p>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800 mb-2">Tanggal Dari</label>
+                    <input
+                      type="date"
+                      value={dateRange.from}
+                      onChange={(event) =>
+                        setDateRange((prev) => ({ ...prev, from: event.target.value }))
+                      }
+                      className="w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800 mb-2">Tanggal Sampai</label>
+                    <input
+                      type="date"
+                      value={dateRange.to}
+                      onChange={(event) =>
+                        setDateRange((prev) => ({ ...prev, to: event.target.value }))
+                      }
+                      className="w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-800"
+                    />
+                  </div>
                 </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="bg-slate-900 text-white px-4 py-2 rounded-2xl text-sm font-semibold"
+                  >
+                    Pilih File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportTransactions}
+                    className="bg-white text-slate-800 border border-slate-200 px-4 py-2 rounded-2xl text-sm font-semibold"
+                  >
+                    Simpan File
+                  </button>
+                  <p className="text-xs text-slate-500">Admin dapat impor, edit, lalu simpan ulang file transaksi.</p>
+                </div>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv,.pdf"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
+
+                {uploading && (
+                  <div className="mt-4 bg-amber-50 text-amber-700 border border-amber-200 rounded-2xl p-3 text-sm">
+                    Membaca file transaksi...
+                  </div>
+                )}
+
+                {uploadError && (
+                  <div className="mt-4 bg-red-50 text-red-600 border border-red-200 rounded-2xl p-3 text-sm">
+                    {uploadError}
+                  </div>
+                )}
+
+                {saveFileMessage && (
+                  <div className="mt-4 bg-blue-50 text-blue-700 border border-blue-200 rounded-2xl p-3 text-sm">
+                    {saveFileMessage}
+                  </div>
+                )}
+
+                {uploadInfo && (
+                  <div className="mt-4 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-2xl p-4">
+                    <p className="text-sm font-bold">Import berhasil</p>
+                    <div className="mt-2 text-xs space-y-1">
+                      <p>File: {uploadInfo.fileName}</p>
+                      <p>Sumber: {uploadInfo.sourceType}</p>
+                      <p>Toko: {uploadInfo.storeName}</p>
+                      <p>Sheet: {uploadInfo.sourceSheetName}</p>
+                      <p>Total member: {uploadInfo.totalMembers}</p>
+                      <p>Total baris item: {uploadInfo.totalItems}</p>
+                      <p>Periode: {formatDisplayDate(uploadInfo.dateFrom)} - {formatDisplayDate(uploadInfo.dateTo)}</p>
+                      <p>Waktu import: {uploadInfo.importedAt}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={resetToDefault}
+                      className="mt-3 bg-white text-emerald-700 border border-emerald-200 px-3 py-2 rounded-2xl text-xs font-semibold"
+                    >
+                      Reset ke Data Contoh
+                    </button>
+                  </div>
+                )}
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                <div>
-                  <label className="block text-sm font-semibold text-slate-800 mb-2">Tanggal Dari</label>
-                  <input
-                    type="date"
-                    value={dateRange.from}
-                    onChange={(event) =>
-                      setDateRange((prev) => ({ ...prev, from: event.target.value }))
-                    }
-                    className="w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-800"
-                  />
+              <div className="bg-slate-50 rounded-3xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base font-bold text-slate-800">Pengaturan Admin</h3>
+                  <span className="text-xs font-medium text-slate-500">Role Admin</span>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold text-slate-800 mb-2">Tanggal Sampai</label>
-                  <input
-                    type="date"
-                    value={dateRange.to}
-                    onChange={(event) =>
-                      setDateRange((prev) => ({ ...prev, to: event.target.value }))
-                    }
-                    className="w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm text-slate-800"
-                  />
-                </div>
-              </div>
 
-              <div className="mt-4 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="bg-slate-900 text-white px-4 py-2 rounded-2xl text-sm font-semibold"
-                >
-                  Pilih File
-                </button>
-                <p className="text-xs text-slate-500">Hanya admin yang dapat mengimpor transaksi.</p>
-              </div>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".xlsx,.xls,.csv,.pdf"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
-
-              {uploading && (
-                <div className="mt-4 bg-amber-50 text-amber-700 border border-amber-200 rounded-2xl p-3 text-sm">
-                  Membaca file transaksi...
-                </div>
-              )}
-
-              {uploadError && (
-                <div className="mt-4 bg-red-50 text-red-600 border border-red-200 rounded-2xl p-3 text-sm">
-                  {uploadError}
-                </div>
-              )}
-
-              {uploadInfo && (
-                <div className="mt-4 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-2xl p-4">
-                  <p className="text-sm font-bold">Import berhasil</p>
-                  <div className="mt-2 text-xs space-y-1">
-                    <p>File: {uploadInfo.fileName}</p>
-                    <p>Sumber: {uploadInfo.sourceType}</p>
-                    <p>Toko: {uploadInfo.storeName}</p>
-                    <p>Sheet: {uploadInfo.sourceSheetName}</p>
-                    <p>Total member: {uploadInfo.totalMembers}</p>
-                    <p>Total baris item: {uploadInfo.totalItems}</p>
-                    <p>Periode: {formatDisplayDate(uploadInfo.dateFrom)} - {formatDisplayDate(uploadInfo.dateTo)}</p>
-                    <p>Waktu import: {uploadInfo.importedAt}</p>
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800 mb-2">Username Admin</label>
+                    <input
+                      value={adminSettingsForm.username}
+                      onChange={(event) =>
+                        setAdminSettingsForm((prev) => ({ ...prev, username: event.target.value }))
+                      }
+                      className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800 mb-2">Password Baru</label>
+                    <input
+                      type="password"
+                      value={adminSettingsForm.password}
+                      onChange={(event) =>
+                        setAdminSettingsForm((prev) => ({ ...prev, password: event.target.value }))
+                      }
+                      className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800 mb-2">Konfirmasi Password</label>
+                    <input
+                      type="password"
+                      value={adminSettingsForm.confirmPassword}
+                      onChange={(event) =>
+                        setAdminSettingsForm((prev) => ({ ...prev, confirmPassword: event.target.value }))
+                      }
+                      className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                    />
                   </div>
                   <button
                     type="button"
-                    onClick={resetToDefault}
-                    className="mt-3 bg-white text-emerald-700 border border-emerald-200 px-3 py-2 rounded-2xl text-xs font-semibold"
+                    onClick={handleSaveAdminCredentials}
+                    className="w-full bg-slate-900 text-white py-3 rounded-2xl text-sm font-bold"
                   >
-                    Reset ke Data Contoh
+                    Simpan Akun Admin
                   </button>
+                  {adminSettingsMessage && (
+                    <div className="bg-blue-50 text-blue-700 border border-blue-200 rounded-2xl p-3 text-sm">
+                      {adminSettingsMessage}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </div>
+            </>
           )}
 
           {!isAdmin && (
@@ -1096,28 +1372,102 @@ export default function AlpaGiftStyleApp() {
                   </p>
                 </div>
 
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between mb-4 gap-3">
                   <h3 className="text-base font-bold text-slate-800">Transaksi Penjualan</h3>
-                  <span className="text-xs font-medium text-slate-500">
-                    {salesItems.length} Item
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">
+                      {salesItems.length} Item
+                    </span>
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={handleAddSalesItem}
+                        className="bg-slate-900 text-white px-3 py-2 rounded-2xl text-xs font-semibold"
+                      >
+                        Tambah Item
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="space-y-3">
-                  {salesItems.map((item) => (
+                  {salesItems.map((item, index) => (
                     <div
-                      key={`${item.name}-${item.qty}-${item.price}`}
-                      className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between gap-3"
+                      key={`${index}-${item.name}-${item.qty}-${item.price}`}
+                      className="bg-white rounded-2xl border border-slate-200 p-4"
                     >
-                      <div>
-                        <p className="text-sm font-semibold text-slate-800">{item.name}</p>
-                        <p className="text-xs text-slate-500 mt-1">
-                          {item.qty} x {formatRupiah(item.price)}
-                        </p>
-                      </div>
-                      <p className="text-sm font-bold text-slate-800">
-                        {formatRupiah(item.qty * item.price)}
-                      </p>
+                      {isAdmin ? (
+                        <div className="space-y-3">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-500 mb-2">
+                              Nama Produk
+                            </label>
+                            <input
+                              value={item.name}
+                              onChange={(event) =>
+                                handleSalesItemChange(index, "name", event.target.value)
+                              }
+                              className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-500 mb-2">
+                                Qty
+                              </label>
+                              <input
+                                type="number"
+                                min="1"
+                                value={item.qty}
+                                onChange={(event) =>
+                                  handleSalesItemChange(index, "qty", event.target.value)
+                                }
+                                className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-500 mb-2">
+                                Harga
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={item.price}
+                                onChange={(event) =>
+                                  handleSalesItemChange(index, "price", event.target.value)
+                                }
+                                className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm outline-none focus:border-red-400"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-bold text-slate-800">
+                              Total: {formatRupiah(item.qty * item.price)}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSalesItem(index)}
+                              className="bg-white text-red-500 border border-red-200 px-4 py-2 rounded-2xl text-sm font-semibold"
+                            >
+                              Hapus
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-800">{item.name}</p>
+                            <p className="text-xs text-slate-500 mt-1">
+                              {item.qty} x {formatRupiah(item.price)}
+                            </p>
+                          </div>
+                          <p className="text-sm font-bold text-slate-800">
+                            {formatRupiah(item.qty * item.price)}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1138,8 +1488,6 @@ export default function AlpaGiftStyleApp() {
                 <p className="mt-3 text-xs text-slate-300">
                   {appConfig.POINT_RULE || "Perhitungan poin mengikuti konfigurasi toko."}
                 </p>
-
-      
               </div>
             </div>
           )}
