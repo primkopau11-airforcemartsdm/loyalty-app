@@ -9,7 +9,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const ADMIN_CREDENTIALS = {
   username: "admin",
-  password: "admin123",
+  password: "admin1234",
 };
 
 function getTodayString() {
